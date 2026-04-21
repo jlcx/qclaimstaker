@@ -1,0 +1,22 @@
+-- Indexes on the ALGAE-owned source tables that the pipeline benefits from.
+-- NOT applied by `qclaimstaker init-db`. Run these manually, one at a time,
+-- outside any transaction, e.g.:
+--
+--     psql -d algae -c "CREATE INDEX CONCURRENTLY IF NOT EXISTS ..."
+--
+-- CONCURRENTLY is essential: it does not lock writers on tables this size.
+-- Each of these on a 900M-row table will take a long time (hours).
+--
+-- Only build what you'll actually use. At minimum, for the pipeline:
+--   * wd_links(prop) — needed by refresh_direct_types (prop='P31'),
+--     refresh_subclass_closure (prop='P279'), and refresh_transitive_paths
+--     (prop IN transitive_pids). Without it, each of those scans all of
+--     wd_links, which will be painful but not impossible.
+--   * wd_links(src, prop) — used by candidate-property filters checking for
+--     existing statements on src (conflicts_with, requires, forward dedup).
+--
+-- The others are nice-to-haves.
+
+-- CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_wd_links_prop     ON wd_links (prop);
+-- CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_wd_links_src_prop ON wd_links (src, prop);
+-- CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_wd_links_dst_prop ON wd_links (dst, prop);

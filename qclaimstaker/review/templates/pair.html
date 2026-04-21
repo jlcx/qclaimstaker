@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+{% block body %}
+<p><a href="/">← queue</a></p>
+<h1>
+  <span class="pid">{{ src }}</span> {{ src_label }}
+  →
+  <span class="pid">{{ dst }}</span> {{ dst_label }}
+</h1>
+
+<form method="post" action="/pair/{{ src }}/{{ dst }}/decide">
+  <label>Reviewer
+    <input type="text" name="reviewer" value="{{ reviewer }}">
+  </label>
+
+  <h2>Candidates</h2>
+  <table>
+    <thead><tr><th></th><th>pid</th><th>label</th><th>score</th><th>margin</th><th>dir</th></tr></thead>
+    <tbody>
+    {% for c in candidates %}
+      <tr>
+        <td><input type="radio" name="pid" value="{{ c.pid }}"{% if loop.first %} checked{% endif %}></td>
+        <td class="pid">{{ c.pid }}</td>
+        <td>{{ c.label or "" }}</td>
+        <td>{{ "%.3f"|format(c.score) }}</td>
+        <td>{{ "%.3f"|format(c.margin) }}</td>
+        <td>{{ c.direction }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+
+  <label>Other property (free text, e.g. P17)
+    <input type="text" name="other_pid" placeholder="P…">
+  </label>
+  <label>Reject reason
+    <input type="text" name="reject_reason" placeholder="why this pair shouldn't exist">
+  </label>
+  <label>Note
+    <input type="text" name="note">
+  </label>
+
+  <p>
+    <button type="submit" name="decision" value="accept">Accept selected</button>
+    <button type="submit" name="decision" value="other">Use other</button>
+    <button type="submit" name="decision" value="reject">Reject pair</button>
+  </p>
+</form>
+{% endblock %}

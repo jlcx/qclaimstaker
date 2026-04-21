@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block body %}
+<h1>Review queue — dump {{ dump_version }}</h1>
+<p class="muted">{{ rows|length }} pairs · offset {{ offset }}</p>
+<table>
+  <thead><tr><th>src</th><th>dst</th><th>top score</th><th>wp</th><th></th></tr></thead>
+  <tbody>
+  {% for r in rows %}
+    <tr>
+      <td><span class="pid">{{ r.src }}</span> {{ r.src_label }}</td>
+      <td><span class="pid">{{ r.dst }}</span> {{ r.dst_label }}</td>
+      <td>{{ "%.3f"|format(r.top_score) }}</td>
+      <td>{{ r.wp_count }}</td>
+      <td><a href="/pair/{{ r.src }}/{{ r.dst }}">review →</a></td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+<p>
+  {% if offset > 0 %}<a href="/?offset={{ offset - limit }}&limit={{ limit }}">← prev</a>{% endif %}
+  <a href="/?offset={{ offset + limit }}&limit={{ limit }}">next →</a>
+</p>
+{% endblock %}
