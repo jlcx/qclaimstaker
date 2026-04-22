@@ -11,6 +11,7 @@ MIGRATIONS = [
     "002_derived_tables.sql",
     "003_seed_inverses.sql",
     "004_seed_blocklists.sql",
+    "009_edge_cache.sql",
     "010_subclass_closure.sql",
     "011_transitive_paths.sql",
     "012_candidate_refresh.sql",

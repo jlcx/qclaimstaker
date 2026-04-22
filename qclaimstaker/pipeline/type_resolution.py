@@ -1,5 +1,5 @@
-"""Populate direct_types from wd_links (prop='P31') and refresh subclass_closure
-and type_closure via the SQL functions.
+"""Populate direct_types from wd_links (prop='P31'), cache P279 edges, then
+refresh subclass_closure and type_closure via the SQL functions.
 
 Item JSON is not required — P31 is captured in wd_links. Only wd_properties
 carries full JSON (for P2302 constraint qualifiers)."""
@@ -22,6 +22,14 @@ def refresh_direct_types() -> int:
             """
         )
         n = cur.rowcount
+        conn.commit()
+    return n
+
+
+def refresh_p279_edges() -> int:
+    with connect() as conn, conn.cursor() as cur:
+        cur.execute("SELECT refresh_p279_edges()::int AS n")
+        n = cur.fetchone()["n"]
         conn.commit()
     return n
 

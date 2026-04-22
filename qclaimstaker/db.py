@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 from collections.abc import Iterator
 from contextlib import contextmanager
 
@@ -9,9 +10,15 @@ from psycopg.rows import dict_row
 from .config import settings
 
 
+def _print_notice(diag: psycopg.errors.Diagnostic) -> None:
+    msg = diag.message_primary or ""
+    print(f"NOTICE: {msg}", file=sys.stderr, flush=True)
+
+
 @contextmanager
 def connect(autocommit: bool = False) -> Iterator[psycopg.Connection]:
     with psycopg.connect(settings.dsn, autocommit=autocommit, row_factory=dict_row) as conn:
+        conn.add_notice_handler(_print_notice)
         yield conn
 
 
