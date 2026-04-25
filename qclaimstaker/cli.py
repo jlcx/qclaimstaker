@@ -31,8 +31,8 @@ def rebuild_types():
     typer.echo(f"direct_types rows: {n}")
     e = type_resolution.refresh_p279_edges()
     typer.echo(f"p279_edges rows: {e}")
-    sc, tc = type_resolution.refresh_closures()
-    typer.echo(f"subclass_closure rows: {sc}; type_closure rows: {tc}")
+    sc, _ = type_resolution.refresh_closures()
+    typer.echo(f"subclass_closure rows: {sc} (type_closure not materialized)")
 
 
 @app.command("load-properties")
@@ -61,6 +61,8 @@ def load_constraints():
 
 @app.command("refresh-transitive")
 def refresh_transitive():
+    e = candidates.refresh_transitive_edges()
+    typer.echo(f"transitive_edges rows: {e}")
     n = candidates.refresh_transitive_paths()
     typer.echo(f"transitive_paths rows: {n}")
 
@@ -100,11 +102,12 @@ def run_all(dump_version: str):
     are already populated (and optionally wd_labels for nicer review UI)."""
     schema.apply_all()
     schema.record_dump(dump_version)
+    inverse.load_p1696_inverses()
+    constraints.refresh_property_constraints()
     type_resolution.refresh_direct_types()
     type_resolution.refresh_p279_edges()
     type_resolution.refresh_closures()
-    inverse.load_p1696_inverses()
-    constraints.refresh_property_constraints()
+    candidates.refresh_transitive_edges()
     candidates.refresh_transitive_paths()
     candidates.refresh_candidate_pairs(dump_version)
     candidates.refresh_candidate_properties(dump_version)

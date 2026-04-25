@@ -41,7 +41,7 @@ Output of this stage: `candidate_pairs(src, dst, wp_count)`.
 
 ### 2. Transitive closure pruning
 
-- Recursive CTE walk over a configurable set of transitive properties: `P361`, `P527`, `P131`, `P276`, `P279`, `P171`, plus the `P31 ∘ P279*` composition. Depth bound (default 6) is a tunable per property.
+- Iterative frontier BFS over a configurable set of transitive properties: `P361`, `P527`, `P131`, `P276`, `P279`, `P171`. Depth bound default **3** — the original spec said 6, but at full Wikidata scale those 6 PIDs together form a densely connected graph and the frontier roughly triples per round, so depth 6 yields billions of pairs with little additional pruning signal beyond depth 3. The `P31 ∘ P279*` composition that this section originally folded into the walk is handled inline at candidate time via `direct_types ⋈ subclass_closure`, since its materialized form is ~1B rows at scale.
 - Drop any candidate pair where the relationship is already implied along such a chain.
 - Materialized as a view refreshed per dump. The v1 `has_any_path` Python walker is removed; that work belongs in the database.
 
@@ -49,7 +49,7 @@ Output of this stage: `candidate_pairs(src, dst, wp_count)`.
 
 - For every entity, materialize two sets:
   - `direct_types(qid, type_qid)` — raw `P31` values.
-  - `type_closure(qid, type_qid)` — `P31` followed by `P279*` up to depth 10.
+  - `type_closure(qid, type_qid)` — conceptually `P31` followed by `P279*`, but **not materialized**. Even restricted to ancestor types that appear in property constraints or blocklists, the deduped join over 126 M `direct_types` rows spills tens of terabytes of temp and takes many hours. Every use site instead joins `direct_types ⋈ subclass_closure` inline via their PK indexes (two lookups per check). The `type_closure` table is kept empty for schema stability.
 - Aggregation for histograms uses `direct_types`. Constraint matching uses `type_closure`. This fixes the v1 fracture where equivalent subtypes (e.g., "species of dinosaur" vs. "taxon") were counted separately and failed constraint matches expecting a superclass.
 
 ### 4. Noise filtering

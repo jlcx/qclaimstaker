@@ -129,20 +129,26 @@ qclaimstaker rebuild-types
 Three phases:
 - `direct_types` — `DISTINCT src, dst FROM wd_links WHERE prop='P31'`
   (fast with `idx_wd_links_prop`).
-- `subclass_closure` — recursive P279* walk, depth capped by
-  `QCS_SUBCLASS_MAX_DEPTH` (default 10).
-- `type_closure` — `direct_types ⋈ subclass_closure`.
+- `p279_edges` — small local cache of P279 edges from `wd_links`; the walk
+  joins against this instead of the 900 M-row parent.
+- `subclass_closure` — iterative BFS over `p279_edges`, depth capped by
+  `QCS_SUBCLASS_MAX_DEPTH` (default 10). Emits `NOTICE` per depth.
+
+`type_closure` is **not** materialized; every use joins
+`direct_types ⋈ subclass_closure` inline. See the header of
+`sql/010_subclass_closure.sql` for the reasoning.
 
 Sanity check:
 
 ```sql
 SELECT COUNT(*) FROM direct_types;
+SELECT COUNT(*) FROM p279_edges;
 SELECT COUNT(*) FROM subclass_closure;
-SELECT COUNT(*) FROM type_closure;
 ```
 
-If `subclass_closure` explodes past ~50M rows or the command hangs past ~15
-min, drop `QCS_SUBCLASS_MAX_DEPTH` to 6 and re-run.
+Expected shapes on full Wikidata: direct_types ~100–130 M, p279_edges
+~3–6 M, subclass_closure a few hundred M (half direct_types self-pairs,
+half real closure).
 
 ### 7. Transitive closure
 
@@ -150,10 +156,21 @@ min, drop `QCS_SUBCLASS_MAX_DEPTH` to 6 and re-run.
 qclaimstaker refresh-transitive
 ```
 
-Recursive CTE over `QCS_TRANSITIVE_PIDS`
-(default: `P361 P527 P131 P276 P279 P171`) up to
-`QCS_TRANSITIVE_MAX_DEPTH` (default 6). Feeds the pruning step in
-`refresh-candidates`.
+Two phases:
+
+- `transitive_edges` — a deduped local cache of `wd_links` rows whose
+  `prop` is in `QCS_TRANSITIVE_PIDS` (default
+  `P361 P527 P131 P276 P279 P171`). One seq scan of `wd_links`.
+- `transitive_paths` — iterative frontier BFS over `transitive_edges` up to
+  `QCS_TRANSITIVE_MAX_DEPTH` (default 3 — the 6 transitive PIDs together
+  form a densely connected graph; the frontier roughly triples per round,
+  so depth 6 yields billions of pairs with little additional pruning
+  signal beyond depth 3). Emits `NOTICE` per depth. Feeds
+  the pruning step in `refresh-candidates`.
+
+The P31∘P279* composition that the original spec folded into
+`transitive_paths` is handled inline in `refresh-candidates` instead —
+the materialized join is prohibitively large at Wikidata scale.
 
 ### 8. Candidates + priors
 

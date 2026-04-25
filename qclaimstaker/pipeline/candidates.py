@@ -7,11 +7,22 @@ from ..config import settings
 from ..db import connect
 
 
+def refresh_transitive_edges() -> int:
+    with connect() as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT refresh_transitive_edges(%s)::int AS n",
+            (settings.transitive_pids,),
+        )
+        n = cur.fetchone()["n"]
+        conn.commit()
+    return n
+
+
 def refresh_transitive_paths() -> int:
     with connect() as conn, conn.cursor() as cur:
         cur.execute(
-            "SELECT refresh_transitive_paths(%s, %s)::int AS n",
-            (settings.transitive_pids, settings.transitive_max_depth),
+            "SELECT refresh_transitive_paths(%s)::int AS n",
+            (settings.transitive_max_depth,),
         )
         n = cur.fetchone()["n"]
         conn.commit()

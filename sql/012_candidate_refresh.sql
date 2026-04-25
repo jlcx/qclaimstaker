@@ -34,19 +34,36 @@ BEGIN
       AND NOT EXISTS (
             SELECT 1 FROM transitive_paths t
             WHERE t.src = r.src AND t.dst = r.dst)
+      -- P31 ∘ P279* composition: dst is already an ancestor-type of src's
+      -- direct type(s). Inlined rather than folded into transitive_paths
+      -- because materializing that join at Wikidata scale spills terabytes.
+      AND NOT EXISTS (
+            SELECT 1
+            FROM direct_types dt
+            JOIN subclass_closure sc ON sc.sub_qid = dt.type_qid
+            WHERE dt.qid = r.src AND sc.super_qid = r.dst AND sc.depth > 0)
       AND NOT EXISTS (
             SELECT 1 FROM meta_type_blocklist m
-            JOIN type_closure tc ON tc.type_qid = m.qid
-            WHERE tc.qid = r.src OR tc.qid = r.dst)
+            JOIN direct_types dt ON dt.qid = r.src OR dt.qid = r.dst
+            JOIN subclass_closure sc ON sc.sub_qid = dt.type_qid
+                                    AND sc.super_qid = m.qid)
       AND NOT EXISTS (SELECT 1 FROM source_blocklist sb      WHERE sb.qid = r.src)
       AND NOT EXISTS (SELECT 1 FROM destination_blocklist db WHERE db.qid = r.dst)
-      -- type-assertion dedupe: one side is already a declared type of the other.
+      -- type-assertion dedupe: one side is already a declared type of the
+      -- other. Goes through direct_types+subclass_closure rather than
+      -- type_closure because type_closure is (intentionally) restricted to
+      -- types that property constraints / blocklists reference, whereas
+      -- this check needs every possible QID-as-type.
       AND NOT EXISTS (
-            SELECT 1 FROM type_closure tc1
-            WHERE tc1.qid = r.src AND tc1.type_qid = r.dst)
+            SELECT 1
+            FROM direct_types dt
+            JOIN subclass_closure sc ON sc.sub_qid = dt.type_qid
+            WHERE dt.qid = r.src AND sc.super_qid = r.dst)
       AND NOT EXISTS (
-            SELECT 1 FROM type_closure tc2
-            WHERE tc2.qid = r.dst AND tc2.type_qid = r.src)
+            SELECT 1
+            FROM direct_types dt
+            JOIN subclass_closure sc ON sc.sub_qid = dt.type_qid
+            WHERE dt.qid = r.dst AND sc.super_qid = r.src)
   )
   INSERT INTO candidate_pairs (src, dst, wp_count, dump_version)
   SELECT src, dst, wp_count, p_dump FROM filtered;
@@ -75,11 +92,15 @@ BEGIN
     AND (pc.subject_types IS NULL OR EXISTS (
           SELECT 1
           FROM jsonb_array_elements_text(pc.subject_types) st(type_qid)
-          JOIN type_closure tc ON tc.type_qid = st.type_qid AND tc.qid = cp.src))
+          JOIN direct_types dt ON dt.qid = cp.src
+          JOIN subclass_closure sc ON sc.sub_qid = dt.type_qid
+                                  AND sc.super_qid = st.type_qid))
     AND (pc.value_types IS NULL OR EXISTS (
           SELECT 1
           FROM jsonb_array_elements_text(pc.value_types) vt(type_qid)
-          JOIN type_closure tc ON tc.type_qid = vt.type_qid AND tc.qid = cp.dst))
+          JOIN direct_types dt ON dt.qid = cp.dst
+          JOIN subclass_closure sc ON sc.sub_qid = dt.type_qid
+                                  AND sc.super_qid = vt.type_qid))
     AND (pc.exceptions IS NULL OR NOT EXISTS (
           SELECT 1 FROM jsonb_array_elements_text(pc.exceptions) e(qid)
           WHERE e.qid = cp.src OR e.qid = cp.dst))

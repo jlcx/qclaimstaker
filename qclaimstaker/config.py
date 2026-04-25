@@ -15,7 +15,10 @@ class Settings(BaseSettings):
 
     min_wp_count: int = 20
     subclass_max_depth: int = 10
-    transitive_max_depth: int = 6
+    # SPEC said 6, but at full Wikidata scale the 6-PID closure grows
+    # exponentially (frontier ~3x per round). 3 captures the useful
+    # "already implied" cases without exploding into billions of pairs.
+    transitive_max_depth: int = 3
     transitive_pids: list[str] = Field(
         default_factory=lambda: ["P361", "P527", "P131", "P276", "P279", "P171"]
     )

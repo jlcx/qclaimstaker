@@ -35,12 +35,12 @@ def refresh_p279_edges() -> int:
 
 
 def refresh_closures() -> tuple[int, int]:
+    """Refresh subclass_closure. type_closure is not materialized at Wikidata
+    scale (see 010_subclass_closure.sql); returns (sc_rows, 0)."""
     with connect() as conn, conn.cursor() as cur:
         cur.execute(
             "SELECT refresh_subclass_closure(%s)::int AS n", (settings.subclass_max_depth,)
         )
         sc_n = cur.fetchone()["n"]
-        cur.execute("SELECT refresh_type_closure()::int AS n")
-        tc_n = cur.fetchone()["n"]
         conn.commit()
-    return sc_n, tc_n
+    return sc_n, 0

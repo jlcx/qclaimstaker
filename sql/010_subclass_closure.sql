@@ -114,19 +114,18 @@ END;
 $$ LANGUAGE plpgsql;
 
 
--- type_closure = direct_types ⋈ subclass_closure.
+-- type_closure is NOT materialized. At Wikidata scale the direct_types ⋈
+-- subclass_closure product is 0.6–2B rows, and dedup of that set spills tens
+-- of terabytes of temp. Every use site in 012_candidate_refresh.sql has been
+-- rewritten to join direct_types+subclass_closure inline via their PKs, which
+-- is two index lookups per check instead of one. The `type_closure` table
+-- itself is kept empty (for schema stability / future reuse) but no refresh
+-- is run. A no-op function is retained so callers don't fail.
+
 CREATE OR REPLACE FUNCTION refresh_type_closure()
 RETURNS integer AS $$
-DECLARE
-  n integer;
 BEGIN
-  SET LOCAL work_mem = '2GB';
-  TRUNCATE type_closure;
-  INSERT INTO type_closure (qid, type_qid)
-  SELECT DISTINCT dt.qid, sc.super_qid
-  FROM direct_types dt
-  JOIN subclass_closure sc ON sc.sub_qid = dt.type_qid;
-  GET DIAGNOSTICS n = ROW_COUNT;
-  RETURN n;
+  RAISE NOTICE 'refresh_type_closure: no-op; type_closure is not materialized (see 010_subclass_closure.sql header)';
+  RETURN 0;
 END;
 $$ LANGUAGE plpgsql;

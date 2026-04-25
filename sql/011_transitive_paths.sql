@@ -1,18 +1,31 @@
 -- Pairs (src, dst) already implied by a chain over the configured transitive
--- properties, or by the P31 ∘ P279* composition. Rebuilt per dump.
+-- properties. Built via iterative frontier BFS over transitive_edges (a
+-- deduped local cache of wd_links filtered to the transitive PIDs; see
+-- 009_edge_cache.sql). Each round inserts only newly-reached pairs; the
+-- frontier shrinks to empty and we exit early.
 --
--- NOTE: for a full Wikidata dump this MV can be very large. If it grows
--- unmanageable, partition by the first transitive step or shard by PID and
--- union the parts. For v1 we keep it simple.
+-- Notes on what this used to do and no longer does:
+--   * The earlier version ran WITH RECURSIVE over wd_links WHERE prop =
+--     ANY(...) at depth 6, with UNION dedup. At Wikidata scale that spills
+--     tens of GB of temp per hour and eventually times out. Fixed here by
+--     caching edges and walking iteratively with PK-based dedup.
+--   * The earlier version also folded in the P31 ∘ P279* composition into
+--     transitive_paths. That join (direct_types ⋈ subclass_closure) at full
+--     scale is a 600M+ row beast whose DISTINCT spills over a terabyte. It
+--     is now handled inline in refresh_candidate_pairs via direct_types +
+--     subclass_closure with PK index lookups.
 
 CREATE OR REPLACE FUNCTION refresh_transitive_paths(
-  p_transitive_pids text[] DEFAULT ARRAY['P361','P527','P131','P276','P279','P171'],
   p_max_depth int DEFAULT 6
 )
 RETURNS integer AS $$
 DECLARE
-  n integer;
+  d int;
+  added int;
+  total int;
 BEGIN
+  SET LOCAL work_mem = '2GB';
+
   DROP TABLE IF EXISTS transitive_paths;
   CREATE TABLE transitive_paths (
     src text NOT NULL,
@@ -20,33 +33,64 @@ BEGIN
     PRIMARY KEY (src, dst)
   );
 
-  WITH RECURSIVE walk(src, dst, depth) AS (
-    SELECT src, dst, 1
-    FROM wd_links
-    WHERE prop = ANY(p_transitive_pids)
-    UNION
-    SELECT w.src, wl.dst, w.depth + 1
-    FROM walk w
-    JOIN wd_links wl ON wl.src = w.dst
-    WHERE wl.prop = ANY(p_transitive_pids)
-      AND w.depth < p_max_depth
-  )
+  CREATE TEMP TABLE _tp_cur (
+    src text NOT NULL,
+    dst text NOT NULL,
+    PRIMARY KEY (src, dst)
+  ) ON COMMIT DROP;
+
+  CREATE TEMP TABLE _tp_nxt (
+    src text NOT NULL,
+    dst text NOT NULL,
+    PRIMARY KEY (src, dst)
+  ) ON COMMIT DROP;
+
+  RAISE NOTICE 'depth 1: direct transitive edges';
+
+  INSERT INTO _tp_cur (src, dst)
+  SELECT src, dst FROM transitive_edges
+  ON CONFLICT DO NOTHING;
+  ANALYZE _tp_cur;
+
   INSERT INTO transitive_paths (src, dst)
-  SELECT DISTINCT src, dst FROM walk
+  SELECT src, dst FROM _tp_cur
   ON CONFLICT DO NOTHING;
 
-  -- P31 ∘ P279* composition: an entity is "transitively linked" to every
-  -- ancestor of each of its direct types.
-  INSERT INTO transitive_paths (src, dst)
-  SELECT DISTINCT dt.qid, sc.super_qid
-  FROM direct_types dt
-  JOIN subclass_closure sc ON sc.sub_qid = dt.type_qid
-  WHERE sc.depth > 0
-  ON CONFLICT DO NOTHING;
+  GET DIAGNOSTICS added = ROW_COUNT;
+  SELECT COUNT(*) INTO total FROM transitive_paths;
+  RAISE NOTICE 'depth 1 done; frontier=%, paths=%', added, total;
+
+  FOR d IN 2..p_max_depth LOOP
+    TRUNCATE _tp_nxt;
+
+    INSERT INTO _tp_nxt (src, dst)
+    SELECT DISTINCT c.src, e.dst
+    FROM _tp_cur c
+    JOIN transitive_edges e ON e.src = c.dst
+    LEFT JOIN transitive_paths tp
+      ON tp.src = c.src AND tp.dst = e.dst
+    WHERE tp.src IS NULL
+    ON CONFLICT DO NOTHING;
+
+    GET DIAGNOSTICS added = ROW_COUNT;
+    EXIT WHEN added = 0;
+
+    INSERT INTO transitive_paths (src, dst)
+    SELECT src, dst FROM _tp_nxt
+    ON CONFLICT DO NOTHING;
+
+    TRUNCATE _tp_cur;
+    INSERT INTO _tp_cur (src, dst) SELECT src, dst FROM _tp_nxt;
+    ANALYZE _tp_cur;
+
+    SELECT COUNT(*) INTO total FROM transitive_paths;
+    RAISE NOTICE 'depth % done; frontier=%, paths=%', d, added, total;
+  END LOOP;
 
   CREATE INDEX transitive_paths_dst_idx ON transitive_paths(dst);
 
-  GET DIAGNOSTICS n = ROW_COUNT;
-  RETURN (SELECT COUNT(*) FROM transitive_paths);
+  SELECT COUNT(*) INTO total FROM transitive_paths;
+  RAISE NOTICE 'transitive_paths complete: % rows', total;
+  RETURN total;
 END;
 $$ LANGUAGE plpgsql;
