@@ -144,11 +144,16 @@ Sanity check:
 SELECT COUNT(*) FROM direct_types;
 SELECT COUNT(*) FROM p279_edges;
 SELECT COUNT(*) FROM subclass_closure;
+SELECT COUNT(*) FROM subclass_closure WHERE sub_qid = super_qid;
+SELECT COUNT(*) FROM subclass_closure WHERE sub_qid = 'Q5';
 ```
 
 Expected shapes on full Wikidata: direct_types ~100–130 M, p279_edges
 ~3–6 M, subclass_closure a few hundred M (half direct_types self-pairs,
-half real closure).
+half real closure). The self-pair count should be in the millions and
+`Q5` should report ~25–30 ancestor rows. A `COUNT(*)` that looks
+plausible while self-pairs are 0 silently breaks every downstream
+stage — see "Known gotchas".
 
 ### 7. Transitive closure
 
@@ -182,7 +187,10 @@ qclaimstaker refresh-prior
 - `refresh-candidates` builds `candidate_pairs` (pairs above
   `QCS_MIN_WP_COUNT`, not covered directly, via inverses, or transitively,
   and not a type-assertion near-duplicate) and then `candidate_properties`
-  (per pair × constraint-compatible `P`).
+  (per pair × constraint-compatible `P`). Both are staged plpgsql
+  functions that emit a `NOTICE` per stage — pairs run stages A–H,
+  properties run stages 1–8. The intermediate counts are useful when
+  triaging where time is going.
 - `refresh-prior` fills `type_pair_prior` — Laplace-smoothed
   `P(P | src_direct_types, dst_direct_types)` estimated from `wd_links`.
 
@@ -281,3 +289,10 @@ qclaimstaker/
   `_qid` variants). Same for `wp_links`.
 - **Re-running `load-inverses` reports 0 added** — that's correct; every
   row hits `ON CONFLICT DO NOTHING` the second time.
+- **`refresh-candidates` reports `src_match: 0` / `dst_match: 0`.**
+  `subclass_closure` is empty or missing self-pairs (a previously
+  cancelled rebuild can leave it that way). Rebuild directly with
+  `psql -d algae -c 'SELECT refresh_subclass_closure(10);'` — it
+  TRUNCATEs and walks p279_edges in one shot. Watch the per-depth
+  NOTICEs; closure should converge by depth ~7 and finish at ~250 M
+  rows. Then re-run `refresh-candidates`.
