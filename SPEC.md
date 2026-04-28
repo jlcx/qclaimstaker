@@ -73,11 +73,14 @@ Build `property_constraints(pid, subject_types jsonb, value_types jsonb, conflic
 
 For each surviving `(src, dst)`, the candidate property set consists of properties `P` such that:
 
+- some `(t_s, t_v)` with `t_s ∈ direct_types(src)` and `t_v ∈ direct_types(dst)` has at least one observation of `P` in `wd_links` (i.e., `(t_s, t_v, P) ∈ type_pair_prior`), and
 - some `t_s ∈ src.type_closure` satisfies `P`'s subject-type constraint (or `P` has none), and
 - some `t_v ∈ dst.type_closure` satisfies `P`'s value-type constraint (or `P` has none), and
 - no `P`-conflicts-with statement is already present on `src`, and
 - any `P`-item-requires-statement is satisfied on `src`, and
 - if `P` has a `one_of` value list, `dst` is in it.
+
+The first clause (empirical-evidence gate) is a tightening from the original spec, which admitted any constraint-compatible property. At full Wikidata scale the constraint-only set is combinatorially explosive — common types like `Q5` (human) are subject_types of hundreds of properties, so every human-src pair admits ~thousands of pids before any meaningful filter runs. Gating by `type_pair_prior` caps the per-pair candidate set to pids with at least one empirical observation between the pair's direct types, which matches what the ranking step would prioritize anyway. Coverage cost: pids never previously observed for any type combination of the pair are excluded; ranking already assigned those near-zero score, so the cost is small.
 
 For each candidate, also carry its `inverse_pid` so ranking and review can present the pair in its most natural direction regardless of the Wikipedia link direction.
 

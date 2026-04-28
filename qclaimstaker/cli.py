@@ -68,10 +68,18 @@ def refresh_transitive():
 
 
 @app.command("refresh-candidates")
-def refresh_candidates(dump_version: str = ""):
+def refresh_candidates(dump_version: str = "", skip_prior: bool = False):
+    """Build candidate_pairs, then type_pair_prior (unless --skip-prior), then
+    candidate_properties. The prior must precede properties: properties uses
+    it as the primary filter to avoid the constraint-only combinatorial
+    explosion. --skip-prior is for iteration when the prior is already up to
+    date for this wd_links state."""
     dv = dump_version or settings.dump_version
     n_pairs = candidates.refresh_candidate_pairs(dv)
     typer.echo(f"candidate_pairs: {n_pairs}")
+    if not skip_prior:
+        n_prior = candidates.refresh_type_pair_prior()
+        typer.echo(f"type_pair_prior: {n_prior}")
     n_props = candidates.refresh_candidate_properties(dv)
     typer.echo(f"candidate_properties: {n_props}")
 
@@ -110,8 +118,8 @@ def run_all(dump_version: str):
     candidates.refresh_transitive_edges()
     candidates.refresh_transitive_paths()
     candidates.refresh_candidate_pairs(dump_version)
-    candidates.refresh_candidate_properties(dump_version)
     candidates.refresh_type_pair_prior()
+    candidates.refresh_candidate_properties(dump_version)
     counts = tiering.rank_and_tier(dump_version)
     typer.echo(f"tiers: {counts}")
     path = emitter.emit_auto_queue(dump_version)

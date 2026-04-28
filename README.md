@@ -181,18 +181,35 @@ the materialized join is prohibitively large at Wikidata scale.
 
 ```bash
 qclaimstaker refresh-candidates --dump-version 2026-04-15
-qclaimstaker refresh-prior
 ```
 
-- `refresh-candidates` builds `candidate_pairs` (pairs above
-  `QCS_MIN_WP_COUNT`, not covered directly, via inverses, or transitively,
-  and not a type-assertion near-duplicate) and then `candidate_properties`
-  (per pair × constraint-compatible `P`). Both are staged plpgsql
-  functions that emit a `NOTICE` per stage — pairs run stages A–H,
-  properties run stages 1–8. The intermediate counts are useful when
-  triaging where time is going.
-- `refresh-prior` fills `type_pair_prior` — Laplace-smoothed
-  `P(P | src_direct_types, dst_direct_types)` estimated from `wd_links`.
+`refresh-candidates` runs three plpgsql functions in order:
+
+1. `refresh_candidate_pairs` — pairs above `QCS_MIN_WP_COUNT` that are
+   not covered directly, via inverses, or transitively, and not
+   type-assertion near-duplicates. Stages A–H, one `NOTICE` per stage.
+2. `refresh_type_pair_prior` — populates `type_pair_prior(src_type,
+   dst_type, pid, n_obs)` from `wd_links`. Independent of
+   `candidate_pairs`; depends only on `wd_links`. Pass `--skip-prior` if
+   you've already built it for the current `wd_links` state and just
+   want to re-run properties.
+3. `refresh_candidate_properties` — per pair × `P` candidate set,
+   **gated by `type_pair_prior`**: a `(src, dst, pid)` is only seeded
+   if some direct-type combination of the pair has at least one
+   observation of `pid` in `wd_links`. Constraint-type compatibility
+   (subject_types / value_types / one_of / exceptions / conflicts_with /
+   requires) is then applied as a refinement. Stages 1–8, one `NOTICE`
+   per stage. The earlier constraint-only seed exploded combinatorially
+   at full Wikidata scale (common types like `Q5` are subject_types of
+   hundreds of properties); the prior-gated seed bounds the per-pair
+   candidate set to pids with empirical support — typically tens, not
+   thousands.
+
+Standalone refresh of just the prior:
+
+```bash
+qclaimstaker refresh-prior
+```
 
 ### 9. Rank + tier
 

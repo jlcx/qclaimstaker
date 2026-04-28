@@ -102,117 +102,46 @@ END;
 $$ LANGUAGE plpgsql;
 
 
--- §5: for each surviving pair, enumerate properties whose constraints match.
+-- §5: for each surviving pair, enumerate properties whose constraints match
+-- AND that have empirical evidence between the pair's direct types.
 --
--- Same scaling problem as refresh_candidate_pairs: doing it as one big
--- INSERT...SELECT with seven correlated EXISTS clauses asks the planner to
--- evaluate ~1.2M candidates × ~12k constraints = 14B combinations, with a
--- type-closure walk inside each EXISTS. It spills terabytes.
+-- The constraint-only seed (subject_types ∪ value_types compatibility) is
+-- combinatorially explosive: common types like Q5 (human) appear in
+-- hundreds of properties' subject_types, so every human-src pair gets
+-- ~3000 compatible pids before any meaningful filter runs. At 614k pairs
+-- that's ~1B intermediate triples and >250 GB temp.
 --
--- Staging plan:
---   1. _useful_subj_types / _useful_val_types — types referenced anywhere in
---      property_constraints. ~10k rows each, vs the 9.3k of subclass_closure.
---   2. _src_match(qid, type_qid) — for each unique candidate src, the useful
---      ancestor types it has. Built once via direct_types ⋈ subclass_closure
---      restricted to candidate srcs and useful types. Same for _dst_match.
---   3. _src_pid(src, pid) — (src, pid) pairs where pid's subject_types is
---      satisfied by src (or pid has no subject_types). _dst_pid analogously.
---   4. Cross _src_pid ⋈ candidate_pairs ⋈ _dst_pid → seed _cprop. All joins
---      hit PK indexes, no nested correlated walks.
---   5. Drop on conflicts_with / requires / exceptions / one_of via small
---      flat tables. wd_links (src,dst,*) and inverse-coverage anti-joins are
---      omitted: stages B and C of refresh_candidate_pairs already enforced
---      that no wl(cp.src, cp.dst, *) exists and no wl(cp.dst, cp.src, prop_x)
---      exists for any prop_x with an inverse declared — making both checks
---      redundant here.
+-- Instead, drive the seed from `type_pair_prior(src_type, dst_type, pid)`:
+-- only consider (src, dst, pid) where some (direct_type(src),
+-- direct_type(dst)) combination has at least one observation of pid in
+-- wd_links. That naturally caps the per-pair candidate set to pids with
+-- empirical support — typically tens, not thousands. Constraint
+-- type-compat then runs as a *refinement* filter against the much smaller
+-- surviving set. type_pair_prior is independent of candidate_pairs (it's
+-- a pure aggregation of wd_links by direct types) so it can be built
+-- once per dump and reused.
+--
+-- Coverage tradeoff: pids never previously observed for any type
+-- combination of the pair are excluded. The spec's ranking already
+-- assigns near-zero score to those via the type-pair prior, so the loss
+-- is a small recall cost on long-tail propositions in exchange for
+-- making the function tractable at full Wikidata scale.
 CREATE OR REPLACE FUNCTION refresh_candidate_properties(p_dump text)
 RETURNS integer AS $$
 DECLARE n integer;
 BEGIN
   SET LOCAL work_mem = '2GB';
 
+  IF NOT EXISTS (SELECT 1 FROM information_schema.tables
+                 WHERE table_name = 'type_pair_prior') THEN
+    RAISE EXCEPTION 'type_pair_prior must exist before refresh_candidate_properties; '
+                    'run refresh_type_pair_prior() first (qclaimstaker refresh-prior)';
+  END IF;
+
   DELETE FROM candidate_properties WHERE dump_version = p_dump;
 
-  -- Stage 1: useful types referenced by any property_constraints column.
-  CREATE TEMP TABLE _useful_subj_types ON COMMIT DROP AS
-  SELECT DISTINCT t.type_qid
-  FROM property_constraints pc, jsonb_array_elements_text(pc.subject_types) AS t(type_qid)
-  WHERE pc.subject_types IS NOT NULL;
-  CREATE INDEX ON _useful_subj_types(type_qid);
-  ANALYZE _useful_subj_types;
-  RAISE NOTICE '1. useful subject types: %', (SELECT COUNT(*) FROM _useful_subj_types);
-
-  CREATE TEMP TABLE _useful_val_types ON COMMIT DROP AS
-  SELECT DISTINCT t.type_qid
-  FROM property_constraints pc, jsonb_array_elements_text(pc.value_types) AS t(type_qid)
-  WHERE pc.value_types IS NOT NULL;
-  CREATE INDEX ON _useful_val_types(type_qid);
-  ANALYZE _useful_val_types;
-  RAISE NOTICE '1. useful value types: %', (SELECT COUNT(*) FROM _useful_val_types);
-
-  -- Stage 2: ancestor-type sets restricted to (candidate srcs/dsts, useful types).
-  CREATE TEMP TABLE _src_match (qid text NOT NULL, type_qid text NOT NULL,
-                                PRIMARY KEY (qid, type_qid)) ON COMMIT DROP;
-  INSERT INTO _src_match
-  SELECT DISTINCT cp.src, sc.super_qid
-  FROM (SELECT DISTINCT src FROM candidate_pairs WHERE dump_version = p_dump) cp
-  JOIN direct_types dt ON dt.qid = cp.src
-  JOIN subclass_closure sc ON sc.sub_qid = dt.type_qid
-  JOIN _useful_subj_types u ON u.type_qid = sc.super_qid;
-  ANALYZE _src_match;
-  RAISE NOTICE '2. src_match rows: %', (SELECT COUNT(*) FROM _src_match);
-
-  CREATE TEMP TABLE _dst_match (qid text NOT NULL, type_qid text NOT NULL,
-                                PRIMARY KEY (qid, type_qid)) ON COMMIT DROP;
-  INSERT INTO _dst_match
-  SELECT DISTINCT cp.dst, sc.super_qid
-  FROM (SELECT DISTINCT dst FROM candidate_pairs WHERE dump_version = p_dump) cp
-  JOIN direct_types dt ON dt.qid = cp.dst
-  JOIN subclass_closure sc ON sc.sub_qid = dt.type_qid
-  JOIN _useful_val_types u ON u.type_qid = sc.super_qid;
-  ANALYZE _dst_match;
-  RAISE NOTICE '2. dst_match rows: %', (SELECT COUNT(*) FROM _dst_match);
-
-  -- Stage 3: collapse to (src, pid) and (dst, pid) compatibility tables.
-  CREATE TEMP TABLE _src_pid (src text NOT NULL, pid text NOT NULL,
-                              PRIMARY KEY (src, pid)) ON COMMIT DROP;
-  -- (a) pids with subject-type constraint
-  INSERT INTO _src_pid
-  SELECT DISTINCT sm.qid, pc.pid
-  FROM property_constraints pc
-  JOIN jsonb_array_elements_text(pc.subject_types) AS st(type_qid) ON TRUE
-  JOIN _src_match sm ON sm.type_qid = st.type_qid
-  WHERE pc.subject_types IS NOT NULL
-  ON CONFLICT DO NOTHING;
-  -- (b) pids with NO subject-type constraint: every candidate src qualifies
-  INSERT INTO _src_pid
-  SELECT cs.src, pc.pid
-  FROM (SELECT DISTINCT src FROM candidate_pairs WHERE dump_version = p_dump) cs
-  CROSS JOIN property_constraints pc
-  WHERE pc.subject_types IS NULL
-  ON CONFLICT DO NOTHING;
-  ANALYZE _src_pid;
-  RAISE NOTICE '3. src_pid rows: %', (SELECT COUNT(*) FROM _src_pid);
-
-  CREATE TEMP TABLE _dst_pid (dst text NOT NULL, pid text NOT NULL,
-                              PRIMARY KEY (dst, pid)) ON COMMIT DROP;
-  INSERT INTO _dst_pid
-  SELECT DISTINCT dm.qid, pc.pid
-  FROM property_constraints pc
-  JOIN jsonb_array_elements_text(pc.value_types) AS vt(type_qid) ON TRUE
-  JOIN _dst_match dm ON dm.type_qid = vt.type_qid
-  WHERE pc.value_types IS NOT NULL
-  ON CONFLICT DO NOTHING;
-  INSERT INTO _dst_pid
-  SELECT cs.dst, pc.pid
-  FROM (SELECT DISTINCT dst FROM candidate_pairs WHERE dump_version = p_dump) cs
-  CROSS JOIN property_constraints pc
-  WHERE pc.value_types IS NULL
-  ON CONFLICT DO NOTHING;
-  ANALYZE _dst_pid;
-  RAISE NOTICE '3. dst_pid rows: %', (SELECT COUNT(*) FROM _dst_pid);
-
-  -- Stage 4: seed _cprop via three-way PK join.
+  -- Stage 1: seed _cprop with (src, dst, pid) where pid has empirical evidence
+  -- between some direct type of src and some direct type of dst.
   CREATE TEMP TABLE _cprop (
     src text NOT NULL,
     dst text NOT NULL,
@@ -220,15 +149,90 @@ BEGIN
     PRIMARY KEY (src, dst, pid)
   ) ON COMMIT DROP;
   INSERT INTO _cprop (src, dst, pid)
-  SELECT cp.src, cp.dst, sp.pid
+  SELECT DISTINCT cp.src, cp.dst, tpp.pid
   FROM candidate_pairs cp
-  JOIN _src_pid sp ON sp.src = cp.src
-  JOIN _dst_pid dp ON dp.dst = cp.dst AND dp.pid = sp.pid
-  WHERE cp.dump_version = p_dump;
+  JOIN direct_types ds ON ds.qid = cp.src
+  JOIN direct_types dd ON dd.qid = cp.dst
+  JOIN type_pair_prior tpp
+    ON tpp.src_type = ds.type_qid AND tpp.dst_type = dd.type_qid
+  WHERE cp.dump_version = p_dump
+  ON CONFLICT DO NOTHING;
   ANALYZE _cprop;
-  RAISE NOTICE '4. after subject/value match: %', (SELECT COUNT(*) FROM _cprop);
+  RAISE NOTICE '1. _cprop seeded by type_pair_prior: %', (SELECT COUNT(*) FROM _cprop);
 
-  -- Stage 5: one_of — flatten then anti-join.
+  -- Stage 2: per-pid constraint-type tables, restricted to pids appearing in
+  -- _cprop. Then ancestor-type matches for srcs/dsts in _cprop, restricted
+  -- to types those pids actually mention. Both restrictions cut the
+  -- intermediate sizes by 10–100x vs the unrestricted versions.
+  CREATE TEMP TABLE _pc_subj (pid text NOT NULL, type_qid text NOT NULL,
+                              PRIMARY KEY (pid, type_qid)) ON COMMIT DROP;
+  INSERT INTO _pc_subj
+  SELECT DISTINCT pc.pid, st.type_qid
+  FROM property_constraints pc
+  JOIN (SELECT DISTINCT pid FROM _cprop) cs ON cs.pid = pc.pid
+  JOIN jsonb_array_elements_text(pc.subject_types) AS st(type_qid) ON TRUE
+  WHERE pc.subject_types IS NOT NULL
+  ON CONFLICT DO NOTHING;
+  CREATE INDEX ON _pc_subj(type_qid);
+  ANALYZE _pc_subj;
+
+  CREATE TEMP TABLE _pc_val (pid text NOT NULL, type_qid text NOT NULL,
+                             PRIMARY KEY (pid, type_qid)) ON COMMIT DROP;
+  INSERT INTO _pc_val
+  SELECT DISTINCT pc.pid, vt.type_qid
+  FROM property_constraints pc
+  JOIN (SELECT DISTINCT pid FROM _cprop) cs ON cs.pid = pc.pid
+  JOIN jsonb_array_elements_text(pc.value_types) AS vt(type_qid) ON TRUE
+  WHERE pc.value_types IS NOT NULL
+  ON CONFLICT DO NOTHING;
+  CREATE INDEX ON _pc_val(type_qid);
+  ANALYZE _pc_val;
+  RAISE NOTICE '2. _pc_subj=%, _pc_val=%',
+    (SELECT COUNT(*) FROM _pc_subj), (SELECT COUNT(*) FROM _pc_val);
+
+  CREATE TEMP TABLE _src_match (qid text NOT NULL, type_qid text NOT NULL,
+                                PRIMARY KEY (qid, type_qid)) ON COMMIT DROP;
+  INSERT INTO _src_match
+  SELECT DISTINCT cs.src, sc.super_qid
+  FROM (SELECT DISTINCT src FROM _cprop) cs
+  JOIN direct_types dt ON dt.qid = cs.src
+  JOIN subclass_closure sc ON sc.sub_qid = dt.type_qid
+  JOIN _pc_subj u ON u.type_qid = sc.super_qid;
+  ANALYZE _src_match;
+
+  CREATE TEMP TABLE _dst_match (qid text NOT NULL, type_qid text NOT NULL,
+                                PRIMARY KEY (qid, type_qid)) ON COMMIT DROP;
+  INSERT INTO _dst_match
+  SELECT DISTINCT cs.dst, sc.super_qid
+  FROM (SELECT DISTINCT dst FROM _cprop) cs
+  JOIN direct_types dt ON dt.qid = cs.dst
+  JOIN subclass_closure sc ON sc.sub_qid = dt.type_qid
+  JOIN _pc_val u ON u.type_qid = sc.super_qid;
+  ANALYZE _dst_match;
+  RAISE NOTICE '2. _src_match=%, _dst_match=%',
+    (SELECT COUNT(*) FROM _src_match), (SELECT COUNT(*) FROM _dst_match);
+
+  -- Stage 3: drop _cprop rows where pid declares subject_types and src has no
+  -- ancestor type in that set. Pids without subject_types are universally
+  -- compatible and remain.
+  DELETE FROM _cprop cp
+  WHERE EXISTS (SELECT 1 FROM _pc_subj WHERE pid = cp.pid)
+    AND NOT EXISTS (
+      SELECT 1 FROM _pc_subj ps
+      JOIN _src_match sm ON sm.qid = cp.src AND sm.type_qid = ps.type_qid
+      WHERE ps.pid = cp.pid);
+  RAISE NOTICE '3. after subject_types filter: %', (SELECT COUNT(*) FROM _cprop);
+
+  -- Stage 4: same for value_types.
+  DELETE FROM _cprop cp
+  WHERE EXISTS (SELECT 1 FROM _pc_val WHERE pid = cp.pid)
+    AND NOT EXISTS (
+      SELECT 1 FROM _pc_val pv
+      JOIN _dst_match dm ON dm.qid = cp.dst AND dm.type_qid = pv.type_qid
+      WHERE pv.pid = cp.pid);
+  RAISE NOTICE '4. after value_types filter: %', (SELECT COUNT(*) FROM _cprop);
+
+  -- Stage 5: one_of.
   CREATE TEMP TABLE _pc_one_of (pid text NOT NULL, qid text NOT NULL) ON COMMIT DROP;
   INSERT INTO _pc_one_of
   SELECT pc.pid, o.qid
@@ -236,13 +240,12 @@ BEGIN
   JOIN jsonb_array_elements_text(pc.one_of) o(qid) ON TRUE
   WHERE pc.one_of IS NOT NULL;
   CREATE INDEX ON _pc_one_of(pid, qid);
-  -- delete _cprop rows whose pid declares one_of but cp.dst is not in it
   DELETE FROM _cprop cp
   WHERE EXISTS (SELECT 1 FROM _pc_one_of o WHERE o.pid = cp.pid)
     AND NOT EXISTS (SELECT 1 FROM _pc_one_of o WHERE o.pid = cp.pid AND o.qid = cp.dst);
   RAISE NOTICE '5. after one_of: %', (SELECT COUNT(*) FROM _cprop);
 
-  -- Stage 6: exceptions — small flat table.
+  -- Stage 6: exceptions.
   CREATE TEMP TABLE _pc_exc (pid text NOT NULL, qid text NOT NULL,
                              PRIMARY KEY (pid, qid)) ON COMMIT DROP;
   INSERT INTO _pc_exc
@@ -255,8 +258,7 @@ BEGIN
     SELECT 1 FROM _pc_exc x WHERE x.pid = cp.pid AND (x.qid = cp.src OR x.qid = cp.dst));
   RAISE NOTICE '6. after exceptions: %', (SELECT COUNT(*) FROM _cprop);
 
-  -- Stage 7: conflicts_with — flatten (pid, conflict_pid), then drop pairs
-  -- where wl(src, conflict_pid, *) exists.
+  -- Stage 7: conflicts_with — drop pairs where wl(src, conflict_pid, *) exists.
   CREATE TEMP TABLE _pc_conflict (pid text NOT NULL, conflict_pid text NOT NULL,
                                   PRIMARY KEY (pid, conflict_pid)) ON COMMIT DROP;
   INSERT INTO _pc_conflict
